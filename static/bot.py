@@ -63,6 +63,7 @@ class AppManager:
             "/for":         self.handle_forays,
             "/forays":      self.handle_forays,
             "/add_admin":   self.handle_admin_addition,
+            "/reset":       self.handle_reset,
 
             "/start@"+cfg.TelegramClient.BOT_USER: self.handle_start,
             "/help@"+cfg.TelegramClient.BOT_USER: self.handle_help,
@@ -71,24 +72,27 @@ class AppManager:
             "/ping@"+cfg.TelegramClient.BOT_USER: self.handle_ping,
             "/for@"+cfg.TelegramClient.BOT_USER: self.handle_forays,
             "/forays@"+cfg.TelegramClient.BOT_USER: self.handle_forays,
-            "/add_admin@"+cfg.TelegramClient.BOT_USER: self.handle_admin_addition
+            "/add_admin@"+cfg.TelegramClient.BOT_USER: self.handle_admin_addition,
+            "/reset@"+cfg.TelegramClient.BOT_USER: self.handle_reset,
         }
 
-        # those which use message text
+        # those, which use message text
         self.commands_with_text = {
             "/feedback": self.handle_feedback,
             "/for": self.handle_forays,
             "/forays": self.handle_forays,
             "/add_admin": self.handle_admin_addition,
+            "/reset": self.handle_reset,
 
             "/feedback@" + cfg.TelegramClient.BOT_USER: self.handle_feedback,
             "/for@"+cfg.TelegramClient.BOT_USER: self.handle_forays,
             "/forays@"+cfg.TelegramClient.BOT_USER: self.handle_forays,
-            "/add_admin@" + cfg.TelegramClient.BOT_USER: self.handle_admin_addition
+            "/add_admin@" + cfg.TelegramClient.BOT_USER: self.handle_admin_addition,
+            "/reset@" + cfg.TelegramClient.BOT_USER: self.handle_reset,
         }
 
         # response stuff
-        self.chat_id = None  # id for current message
+        self.chat_id = None  # id for the current message
         self.update = None  # current API response
 
         # catch the bug stuff
@@ -119,12 +123,13 @@ class AppManager:
                 handler = self.commands[txt]
                 handler()
 
-            # handle those commands which need message text
-            for command in self.commands_with_text:
-                if command in txt:
-                    handler = self.commands_with_text[command]
-                    handler(txt)
-                    break
+            # handle those commands that need message text
+            else:
+                for command in self.commands_with_text:
+                    if command in txt:
+                        handler = self.commands_with_text[command]
+                        handler(txt)
+                        break
         except Exception as e:
             log(e, 111)
 
@@ -143,15 +148,15 @@ class AppManager:
 
     def handle_cw3_caravan_stop(self):
         # todo: refactor govnokoda, osobenno dostupa k tablice, glaza krovotochat zhe!
-        username = self.update['message']['from']['username']
-        stop_time_unix = self.update['message']['forward_date']
         try:
+            username = self.update['message']['from']['username']
+            stop_time_unix = self.update['message']['forward_date']
             # fetch users data
-            total, last, avg_time = self.users_db.find(
+            total, last, avg_time, last_time = self.users_db.find(
                 self.caravans_table,
                 "username",
                 "'{}'".format(username),
-                "total_stops, last_stop, avg_timeout"
+                "total_stops, last_stop, avg_timeout, last_timeout"
             )
 
             # update the data
@@ -162,6 +167,12 @@ class AppManager:
                     "Не дури, это не новый корован :)"
                 )
                 return
+            elif time_delta > 30*60*60: # last caravan was 30+ hours ago
+                self.telegram_client.send_message(
+                    self.chat_id,
+                    "Ого! Твой корован пришел около {hours} часов назад. Поищи ещё один, он наверняка где-то затерялся".format(hours = time_delta // 3600)
+                )
+                return
             avg_time = (avg_time*(total-1) + time_delta)/(total)
             total += 1
             last = max(stop_time_unix, last)
@@ -170,7 +181,8 @@ class AppManager:
             values = {
                 "total_stops":  total,
                 "avg_timeout":  avg_time,
-                "last_stop":    last
+                "last_stop":    last,
+                "last_timeout": time_delta
             }
             self.users_db.set(
                 self.caravans_table,
@@ -186,35 +198,44 @@ class AppManager:
             delta_h = time_delta // 3600
             delta_m = (time_delta % 3600) // 60
 
-            # user_id = update['message']['from']['id']
+            last_h = last_time // 3600
+            last_m = (last_time % 3600) // 60
+
             msg = """
 🎮 @{name}
-            
-Всего стопов: 
+
+Всего стопов:
 🛑 {stops}
-            
+
+Текущий интервал между корованами:
+⌛️ {delta_hh}h {delta_mm}m
+
 Последний интервал между корованами:
-⌛️ {last_hh}h {last_mm}m
-            
+⏱ {last_hh}h {last_mm}m
+
 Средний интервал между корованами:
 🛎 {av_hh}h {av_mm}m
             """.format(
                 name=username,
                 stops=total,
-                last_hh=delta_h, last_mm=delta_m,
-                av_hh=av_h, av_mm=av_m
+                last_hh=last_h, last_mm=last_m,
+                av_hh=av_h, av_mm=av_m,
+                delta_hh=delta_h, delta_mm=delta_m
             )
             self.telegram_client.send_message(
                 self.chat_id,
                 msg
             )
+        except KeyError as e:
+            log(e, 888)
         except TypeError:  # user not found -> find gave NoneType
             # write user data to DB
             values = {
                 "username":     username,
                 "total_stops":  1,
                 "last_stop":    stop_time_unix,
-                "avg_timeout":  0
+                "avg_timeout":  0,
+                "last_timeout": 0
             }
             self.users_db.join(
                 self.caravans_table,
@@ -415,7 +436,9 @@ class AppManager:
 Сообщить о баге или просто поиздеваться над говнокодом можно через /feedback
 
 Так же бот может вести статистику приходящих корованов, для этого достаточно просто скинуть ему сообщение из @ChatWarsBot с результатом пришедшего корована.
+ВНИМАНИЕ! Бот принимает корованы в хронологическом порядке, так что если ты скинешь сегодняшний, вчерашний он уже не примет.
 Для того, чтобы посмотреть свою статистику, нажми /for или /forays
+Если ты захочешь сбросить статистику, попроси админа нажать /reset
         """
 
         self.telegram_client.send_message(self.chat_id, msg_text)
@@ -440,8 +463,8 @@ class AppManager:
     def handle_forays(self, text=None):
         try:
             # precise user for foray message
-            if text is None:  # this means command was given in solo or by reply
-                if 'reply_to_message' in self.update['message']:  # this was a reply by admin or staff
+            if text is None:  # this means command was given in solo or by a reply
+                if 'reply_to_message' in self.update['message']:  # this was a reply by the admin or staff
                     username = self.update['message']['reply_to_message']['from']['username']
                     access_given = self.is_admin(
                         self.update['message']['from']['username']
@@ -449,14 +472,20 @@ class AppManager:
                 else:  # this is curious user
                     username = self.update['message']['from']['username']
                     access_given = True
-            else:  # this is curious admin or staff, username given
+            else:  # this is a curious admin or staff, username given
                 if len(text.split()) > 1:
                     if text.split()[1][0] == '@' and\
                        len(text.split()[1]) > 1:
                         username = text.split()[1][1:]
                     else:
+                        self.telegram_client.send_message(
+                            cfg.TelegramClient.DEV_ID, "fck1"
+                        )
                         return
                 else:
+                    self.telegram_client.send_message(
+                            cfg.TelegramClient.DEV_ID, "fck2"
+                        )
                     return
 
                 access_given = self.is_admin(
@@ -487,6 +516,11 @@ class AppManager:
                 self.chat_id,
                 "Кажется, у кого-то нет юзернейма."
             )
+        except Exception as e:
+            self.telegram_client.send_message(
+                            cfg.TelegramClient.DEV_ID, "fck3"
+                        )
+            log(e, 777)
 
     def handle_admin_addition(self, text=None):
         try:
@@ -543,26 +577,135 @@ class AppManager:
                 "Кажется, у кого-то нет юзернейма."
             )
 
+        except Exception as e:
+            log(e, 666)
+
+    def handle_reset(self, text=None):
+        try:
+            # precise user for reset
+            if text is None:  # this means command was given in solo or by a reply
+                if 'reply_to_message' in self.update['message']:  # this was a reply by the admin or staff
+                    username = self.update['message']['reply_to_message']['from']['username']
+                    access_given = self.is_admin(
+                        self.update['message']['from']['username']
+                    )
+                else:  # this is curious user
+                    access_given = False
+            else:  # this is a curious admin or staff, username given
+                if len(text.split()) > 1:
+                    if text.split()[1][0] == '@' and\
+                       len(text.split()[1]) > 1:
+                        username = text.split()[1][1:]
+                    else:
+                        self.telegram_client.send_message(
+                            cfg.TelegramClient.DEV_ID, "fck1"
+                        )
+                        return
+                else:
+                    self.telegram_client.send_message(
+                            cfg.TelegramClient.DEV_ID, "fck2"
+                        )
+                    return
+
+                access_given = self.is_admin(
+                    self.update['message']['from']['username']
+                )
+
+            subject_level = self.get_admin_level(
+                self.update['message']['from']['username']
+            )
+            object_level = self.get_admin_level(
+                username
+            )
+
+            # now just give it to them, if permitted
+            if access_given:
+                if subject_level - object_level <= 0:  # you can't reset admin that easy
+                    self.telegram_client.send_message(self.chat_id, "ʕ´•ᴥ•`ʔ \nсвергнуть админа не так просто")
+                else:
+                    try:
+                        # todo check for injecitons
+                        self.users_db.execute_query(
+                            """DELETE FROM {table_name} WHERE username='{user}'""".format(
+                                table_name=self.caravans_table, user=username
+                            ),
+                            commit=True
+                        )
+                        self.telegram_client.send_message(
+                                self.chat_id,
+                                "Reset successful"
+                            )
+                    except Exception as e:
+                        self.telegram_client.send_message(
+                            cfg.TelegramClient.DEV_ID,
+                            str(e)
+                        )
+                        self.telegram_client.send_message_with_markdown(
+                            self.chat_id,
+                            "Failed to reset ```@{user}```".format(user=username)
+                        )
+                        log(e,23537)
+            else:
+                self.telegram_client.send_message(
+                    self.chat_id,
+                    "У вас недостаточно прав."
+                )
+        except KeyError as e:
+            log(e)
+            self.telegram_client.send_message(
+                self.chat_id,
+                "Кажется, у кого-то нет юзернейма."
+            )
+        except Exception as e:
+            self.telegram_client.send_message(
+                            cfg.TelegramClient.DEV_ID, "fck3"
+                        )
+            log(e, 777)
+
     def is_admin(self, username):
-        access_level = self.users_db.find(
-            self.admins_table,
-            "username",
-            "'{}'".format(username),
-            "access_lvl"
-        )
-        if access_level is None:
-            return False
-        else:
-            return access_level[0] > 0
+        try:
+            access_level = self.users_db.find(
+                self.admins_table,
+                "username",
+                "'{}'".format(username),
+                "access_lvl"
+            )
+            if access_level is None:
+                return False
+            else:
+                return access_level[0] > 0
+        except Exception as e:
+            log(e, 555)
+
+    def get_admin_level(self, username):
+        """
+        gets admin level.
+        0 = zero level, it's not an administrator
+        :param username: string username
+        :return: int level
+        """
+        try:
+            access_level = self.users_db.find(
+                self.admins_table,
+                "username",
+                "'{}'".format(username),
+                "access_lvl"
+            )
+            if access_level is None:
+                return 0
+            else:
+                return access_level[0]
+        except Exception as e:
+            log(e, 555)
 
     def form_foray(self, username):
         try:
             # fetch users data
-            total, last, avg_time = self.users_db.find(
+            total, last, avg_time, last_time = self.users_db.find(
                 self.caravans_table,
                 "username",
                 "'{}'".format(username),
-                "total_stops, last_stop, avg_timeout"
+                "total_stops, last_stop, avg_timeout, last_timeout"
             )
 
             # get it in a normal look
@@ -574,30 +717,36 @@ class AppManager:
             delta_h = time_delta // 3600
             delta_m = (time_delta % 3600) // 60
 
-            # user_id = update['message']['from']['id']
+            last_h = last_time // 3600
+            last_m = (last_time % 3600) // 60
+
             msg = """
 🎮 @{name}
 
-Всего стопов: 
+Всего стопов:
 🛑 {stops}
 
+Текущий интервал между корованами:
+⌛️ {delta_hh}h {delta_mm}m
+
 Последний интервал между корованами:
-⌛️ {last_hh}h {last_mm}m
+⏱ {last_hh}h {last_mm}m
 
 Средний интервал между корованами:
 🛎 {av_hh}h {av_mm}m
                         """.format(
                 name=username,
                 stops=total,
-                last_hh=delta_h, last_mm=delta_m,
-                av_hh=av_h, av_mm=av_m
+                delta_hh=delta_h, delta_mm=delta_m,
+                av_hh=av_h, av_mm=av_m,
+                last_hh=last_h, last_mm=last_m
             )
             return msg
         except TypeError:
-            return None
+            return "Я такого не знаю \n┐( ˘_˘)┌"
         except Exception as e:
             log(e, 404)
-            return None
+            return "Я такого не знаю \n┐( ˘_˘)┌"
 
     def clean(self):
         User.username = ""
